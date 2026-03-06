@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 from tqdm import tqdm
+import enlighten
 import numpy as np
 import torch
 import torchaudio
@@ -52,8 +53,15 @@ class Model():
             layers = [layers]
 
         if self.checkpoint_path is not None:
-            feature_extractor = transformers.AutoProcessor.from_pretrained(self.checkpoint_path).to(self.device)
-            inputs = feature_extractor(waveform.squeeze().cpu().numpy(), sampling_rate=sample_rate, return_tensors="pt", padding=True).input_values.to(self.device)
+            feature_extractor = transformers.AutoProcessor.from_pretrained(
+                self.checkpoint_path
+            ).to(self.device)
+            inputs = feature_extractor(
+                waveform.squeeze().cpu().numpy(), 
+                sampling_rate=sample_rate, 
+                return_tensors="pt", 
+                padding=True
+            ).input_values.to(self.device)
             features = self.extract_transformer_features(inputs, layers)
             return features
 
@@ -72,7 +80,10 @@ class Model():
     def extract_transformer_features(self, inputs, layers):
 
         all_features = self.model(inputs).hidden_states
-        features = {layer: all_features[layer].squeeze().cpu().numpy() for layer in layers}
+        features = {
+            layer: all_features[layer].squeeze().cpu().numpy() 
+            for layer in layers
+        }
 
         return features
         
@@ -80,7 +91,10 @@ class Model():
     def extract_wavlm_features(self, waveform, layers):
         
         all_features, _ = self.model.extract_features(waveform)
-        features = {layer: all_features[layer].squeeze().cpu().numpy() for layer in layers}
+        features = {
+            layer: all_features[layer].squeeze().cpu().numpy() 
+            for layer in layers
+        }
 
         return features
 
@@ -90,7 +104,10 @@ class Model():
         waveform = waveform.unsqueeze(0)  
 
         if non_units:
-            features = {layer: self.model.encode(waveform, layer=layer).squeeze().cpu().numpy() for layer in layers}
+            features = {
+                layer: self.model.encode(waveform, layer=layer).squeeze().cpu().numpy() 
+                for layer in layers
+            }
             return features
 
         features = {}
@@ -104,7 +121,10 @@ class Model():
     def preprocess_waveform(self, waveform, sample_rate, target_sample_rate=16000, layer_norm=True):
         
         if sample_rate != target_sample_rate:
-            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sample_rate)
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=sample_rate, 
+                new_freq=target_sample_rate
+            )
             waveform = resampler(waveform)
         
         assert waveform.ndim == 2, "Expected waveform to be a 2D tensor (channels, samples)"
@@ -128,17 +148,47 @@ def main(args):
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Extracting features from {input_dir} using {args.model_name} and layers: {args.layers} and saving to {output_dir}")
 
-    for audio_file in tqdm(list(input_dir.glob('*.wav')), desc="Processing audio files", total=len(list(input_dir.glob('*.wav'))), unit="file"):
+    manager = enlighten.get_manager()
+    audio_files = list(input_dir.glob(f'*{args.audio_extension}'))
+    print(f"Extracting features from {input_dir}")
+
+    pbar = manager.counter(
+        total=len(audio_files), 
+        desc="Processing audio", 
+        unit="file", 
+        color="green"
+    )
+    
+    status = manager.status_bar(
+        status_format='Current File: {file}{fill}Layer Norm: {ln}',
+        file="None",
+        ln=str(not args.not_layer_norm)
+    )
+
+    for audio_file in audio_files:
+        status.update(file=audio_file.name)
+
         waveform, sample_rate = torchaudio.load(audio_file)
-        features = model.extract_features(waveform, args.layers, sample_rate, layer_norm=not args.not_layer_norm)
+        features = model.extract_features(
+            waveform, 
+            args.layers, 
+            sample_rate, 
+            layer_norm=not args.not_layer_norm
+        )
 
         for layer, layer_features in features.items():
-            layer_output_dir = output_dir / f'layer_{layer}' if args.not_layer_norm else output_dir / f'layer_{layer}_layernorm'
+            suffix = f'layer_{layer}' if args.not_layer_norm else f'layer_{layer}_layernorm'
+            layer_output_dir = output_dir / suffix
             layer_output_dir.mkdir(parents=True, exist_ok=True)
             
             output_file = layer_output_dir / audio_file.relative_to(input_dir).with_suffix('.npy')
             output_file.parent.mkdir(parents=True, exist_ok=True)
             np.save(output_file, layer_features)
+
+            pbar.update()
+
+    pbar.close()
+    manager.stop()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract features from audio files using WavLM or HuBERT Soft models.")
@@ -146,6 +196,7 @@ if __name__ == "__main__":
     parser.add_argument('input_dir', type=str, help="Directory containing input .wav files.")
     parser.add_argument('output_dir', type=str, help="Directory to save extracted features.")
     parser.add_argument('layers', type=int, nargs='+', help="Layers to extract features from.")
+    parser.add_argument('audio_extension', type=str, default='.wav', help="Audio file extension to process (default: .wav).")
     parser.add_argument('--not_layer_norm', action='store_true', help="Apply layer normalization to the input waveform.")
 
     args = parser.parse_args()
