@@ -14,12 +14,13 @@ class Model():
         self.device = device
         self.model_name = model_name
         self.model = self.load_model()
+        self.checkpoint_path = None
 
     def load_model(self):
-        if self.model_name == 'wavlm':
-            config = WavLMConfig()
-            model = WavLM(config)
+        if self.model_name == 'wavlm_large':  
             checkpoint = torch.load('checkpoints/WavLM-Large.pt', map_location=self.device)
+            config = WavLMConfig(checkpoint['cfg'])
+            model = WavLM(config)
             model.load_state_dict(checkpoint['model'])
             model.to(self.device)
             model.eval()
@@ -65,8 +66,9 @@ class Model():
             return features
 
         waveform = self.preprocess_waveform(waveform, sample_rate, layer_norm=layer_norm)
+        print(f"Preprocessed waveform shape: {waveform.shape}")
         
-        if self.model_name == 'wavlm':
+        if self.model_name == 'wavlm_large':
             features = self.extract_wavlm_features(waveform, layers)
         elif self.model_name == 'hubert_soft':
             features = self.extract_hubert_soft_features(waveform, layers)
@@ -87,9 +89,15 @@ class Model():
         return features
         
     @torch.inference_mode()
-    def extract_wavlm_features(self, waveform, layers):
-        
-        all_features, _ = self.model.extract_features(waveform)
+    def extract_wavlm_features(self, waveform, layers): 
+
+        _, results = self.model.extract_features(
+            waveform, 
+            output_layer=self.model.cfg.encoder_layers, 
+            ret_layer_results=True
+        )[0]
+    
+        all_features = [x.transpose(0, 1) for x, _ in results]
         features = {
             layer: all_features[layer].squeeze().cpu().numpy() 
             for layer in layers
@@ -136,7 +144,9 @@ class Model():
             padding = (400 - waveform.shape[-1]) // 2
             waveform = F.pad(waveform, (padding, padding))
 
-        return waveform.to(self.device)
+        waveform = waveform.to(self.device)
+
+        return waveform
     
 def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -145,29 +155,13 @@ def main(args):
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir) / args.model_name 
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Extracting features from {input_dir} using {args.model_name} and layers: {args.layers} and saving to {output_dir}")
+    print(f"Extracting features from {input_dir} using {args.model_name} and layers: {args.layers}\nSaving to {output_dir}")
 
-    manager = enlighten.get_manager()
     audio_files = list(input_dir.glob(f'*{args.audio_extension}'))
-    print(f"Extracting features from {input_dir}")
-
-    pbar = manager.counter(
-        total=len(audio_files), 
-        desc="Processing audio", 
-        unit="file", 
-        color="green"
-    )
-    
-    status = manager.status_bar(
-        status_format='Current File: {file}{fill}Layer Norm: {ln}',
-        file="None",
-        ln=str(not args.not_layer_norm)
-    )
 
     for audio_file in audio_files:
-        status.update(file=audio_file.name)
 
-        waveform, sample_rate = torchaudio.load(audio_file)
+        waveform, sample_rate = torchaudio.load(str(audio_file))
         features = model.extract_features(
             waveform, 
             args.layers, 
@@ -184,18 +178,13 @@ def main(args):
             output_file.parent.mkdir(parents=True, exist_ok=True)
             np.save(output_file, layer_features)
 
-            pbar.update()
-
-    pbar.close()
-    manager.stop()
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract features from audio files using WavLM or HuBERT Soft models.")
-    parser.add_argument('model_name', type=str, choices=['wavlm_large', 'hubert_soft'], help="Model to use for feature extraction.")
+    parser.add_argument('model_name', type=str, choices=['wavlm_large', 'hubert_soft', 'hubert_large', 'mhubert', 'chinese_hubert_large'], help="Model to use for feature extraction.")
     parser.add_argument('input_dir', type=str, help="Directory containing input .wav files.")
     parser.add_argument('output_dir', type=str, help="Directory to save extracted features.")
     parser.add_argument('layers', type=int, nargs='+', help="Layers to extract features from.")
-    parser.add_argument('audio_extension', type=str, default='.wav', help="Audio file extension to process (default: .wav).")
+    parser.add_argument('--audio_extension', type=str, default='.wav', help="Audio file extension to process (default: .wav).")
     parser.add_argument('--not_layer_norm', action='store_true', help="Apply layer normalization to the input waveform.")
 
     args = parser.parse_args()
