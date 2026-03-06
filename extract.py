@@ -66,7 +66,6 @@ class Model():
             return features
 
         waveform = self.preprocess_waveform(waveform, sample_rate, layer_norm=layer_norm)
-        print(f"Preprocessed waveform shape: {waveform.shape}")
         
         if self.model_name == 'wavlm_large':
             features = self.extract_wavlm_features(waveform, layers)
@@ -155,11 +154,28 @@ def main(args):
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir) / args.model_name 
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Extracting features from {input_dir} using {args.model_name} and layers: {args.layers}\nSaving to {output_dir}")
 
+    manager = enlighten.get_manager()
     audio_files = list(input_dir.glob(f'*{args.audio_extension}'))
 
+    pbar = manager.counter(
+        total=len(audio_files), 
+        desc="Extracting", 
+        unit="files", 
+        color="cyan"
+    )
+
     for audio_file in audio_files:
+
+        expected_outputs = []
+        for layer in args.layers:
+            suffix = f'layer_{layer}' if args.not_layer_norm else f'layer_{layer}_layernorm'
+            out_path = output_dir / suffix / audio_file.relative_to(input_dir).with_suffix('.npy')
+            expected_outputs.append(out_path)
+
+        if all(path.exists() for path in expected_outputs):
+            pbar.update() 
+            continue
 
         waveform, sample_rate = torchaudio.load(str(audio_file))
         features = model.extract_features(
@@ -177,6 +193,12 @@ def main(args):
             output_file = layer_output_dir / audio_file.relative_to(input_dir).with_suffix('.npy')
             output_file.parent.mkdir(parents=True, exist_ok=True)
             np.save(output_file, layer_features)
+        
+        pbar.update()
+
+    pbar.close()
+    manager.stop()
+    print(f"\nDone! Features saved to {output_dir}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract features from audio files using WavLM or HuBERT Soft models.")
